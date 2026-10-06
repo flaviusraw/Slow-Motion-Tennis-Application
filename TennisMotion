@@ -1,0 +1,486 @@
+
+import os
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from threading import Thread
+
+class TennisVideoEditor:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Motion Application")
+        self.root.geometry("1200x1200")
+        
+        # Variables
+        self.video_input = tk.StringVar()
+        self.video_output = tk.StringVar()
+        self.motion_threshold = tk.IntVar(value=50000)  # For slow motion
+        self.fast_motion_threshold = tk.IntVar(value=30000)  # For fast motion
+        self.slow_motion_factor = tk.DoubleVar(value=0.5)  # For slow motion
+        self.fast_motion_factor = tk.DoubleVar(value=2.0)  # For fast motion
+        self.motion_sections = []  # Will store (start, end, motion_type)
+        self.manual_sections = []  # Will store (start, end, motion_type)
+        self.motion_scores = []
+        self.frame_count = 0
+        self.fps = 0
+        self.is_processing = False
+        
+        # Default paths
+        downloads_folder = os.path.expanduser("~/Downloads")
+        self.video_input.set("")
+        self.video_output.set(os.path.join(downloads_folder, "edited_tennis.mp4"))
+        
+        # Create GUI
+        self.create_widgets()
+        
+    def create_widgets(self):
+        # Create main frame with padding
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # File selection frame
+        file_frame = ttk.LabelFrame(main_frame, text="File Selection", padding="10")
+        file_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Input file
+        ttk.Label(file_frame, text="Input Video:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        ttk.Entry(file_frame, textvariable=self.video_input, width=50).grid(row=0, column=1, padx=5, pady=5)
+        ttk.Button(file_frame, text="Browse", command=self.browse_input).grid(row=0, column=2, padx=5, pady=5)
+        
+        # Output file
+        ttk.Label(file_frame, text="Output Video:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        ttk.Entry(file_frame, textvariable=self.video_output, width=50).grid(row=1, column=1, padx=5, pady=5)
+        ttk.Button(file_frame, text="Browse", command=self.browse_output).grid(row=1, column=2, padx=5, pady=5)
+        
+        # Parameters frame
+        param_frame = ttk.LabelFrame(main_frame, text="Parameters", padding="10")
+        param_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Motion thresholds
+        ttk.Label(param_frame, text="Slow Motion Threshold:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        ttk.Scale(param_frame, from_=10000, to=200000, variable=self.motion_threshold, 
+                  orient=tk.HORIZONTAL, length=200).grid(row=0, column=1, padx=5, pady=5)
+        ttk.Label(param_frame, textvariable=self.motion_threshold).grid(row=0, column=2, padx=5, pady=5)
+        
+        # Fast motion threshold (new)
+        ttk.Label(param_frame, text="Fast Motion Threshold:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        ttk.Scale(param_frame, from_=5000, to=100000, variable=self.fast_motion_threshold, 
+                  orient=tk.HORIZONTAL, length=200).grid(row=1, column=1, padx=5, pady=5)
+        ttk.Label(param_frame, textvariable=self.fast_motion_threshold).grid(row=1, column=2, padx=5, pady=5)
+        
+        # Slow motion factor
+        ttk.Label(param_frame, text="Slow Motion Factor:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Scale(param_frame, from_=0.1, to=1.0, variable=self.slow_motion_factor,
+                 orient=tk.HORIZONTAL, length=200).grid(row=2, column=1, padx=5, pady=5)
+        ttk.Label(param_frame, textvariable=self.slow_motion_factor).grid(row=2, column=2, padx=5, pady=5)
+        
+        # Fast motion factor
+        ttk.Label(param_frame, text="Fast Motion Factor:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        ttk.Scale(param_frame, from_=1.0, to=4.0, variable=self.fast_motion_factor,
+                 orient=tk.HORIZONTAL, length=200).grid(row=3, column=1, padx=5, pady=5)
+        ttk.Label(param_frame, textvariable=self.fast_motion_factor).grid(row=3, column=2, padx=5, pady=5)
+        
+        # Analysis frame
+        analysis_frame = ttk.LabelFrame(main_frame, text="Analysis", padding="10")
+        analysis_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Create a placeholder for the graph
+        self.fig, self.ax = plt.subplots(figsize=(8, 3))
+        self.ax.set_title("Motion Intensity")
+        self.ax.set_xlabel("Frame")
+        self.ax.set_ylabel("Motion Score")
+        self.ax.grid(True)
+        
+        self.canvas = FigureCanvasTkAgg(self.fig, master=analysis_frame)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Sections frame
+        sections_frame = ttk.LabelFrame(main_frame, text="Motion Sections", padding="10")
+        sections_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Sections list
+        self.sections_listbox = tk.Listbox(sections_frame, height=6, width=30)
+        self.sections_listbox.grid(row=0, column=0, rowspan=6, padx=5, pady=5, sticky=tk.NSEW)
+        
+        # Scrollbar
+        scrollbar = ttk.Scrollbar(sections_frame, orient=tk.VERTICAL, command=self.sections_listbox.yview)
+        scrollbar.grid(row=0, column=1, rowspan=6, sticky=tk.NS)
+        self.sections_listbox.config(yscrollcommand=scrollbar.set)
+        
+        # Add section manually
+        ttk.Label(sections_frame, text="Start (sec):").grid(row=0, column=2, padx=5, pady=2, sticky=tk.W)
+        self.start_var = tk.DoubleVar()
+        ttk.Entry(sections_frame, textvariable=self.start_var, width=10).grid(row=0, column=3, padx=5, pady=2)
+        
+        ttk.Label(sections_frame, text="End (sec):").grid(row=1, column=2, padx=5, pady=2, sticky=tk.W)
+        self.end_var = tk.DoubleVar()
+        ttk.Entry(sections_frame, textvariable=self.end_var, width=10).grid(row=1, column=3, padx=5, pady=2)
+        
+        # Add manual section type selection (SLOW/FAST/NORMAL)
+        ttk.Label(sections_frame, text="Section Type:").grid(row=2, column=2, padx=5, pady=2, sticky=tk.W)
+        self.section_type_var = tk.StringVar(value="SLOW")
+        section_type_menu = ttk.Combobox(sections_frame, textvariable=self.section_type_var, 
+                                         values=["SLOW", "FAST", "NORMAL"], width=8, state="readonly")
+        section_type_menu.grid(row=2, column=3, padx=5, pady=2)
+        
+        ttk.Button(sections_frame, text="Add Section", command=self.add_manual_section).grid(
+            row=3, column=2, columnspan=2, padx=5, pady=2)
+        ttk.Button(sections_frame, text="Remove Selected", command=self.remove_section).grid(
+            row=4, column=2, columnspan=2, padx=5, pady=2)
+        ttk.Button(sections_frame, text="Clear All", command=self.clear_sections).grid(
+            row=5, column=2, columnspan=2, padx=5, pady=2)
+        
+        # Use radio buttons to choose between automatic and manual modes
+        self.mode_var = tk.StringVar(value="manual")  # Default to "manual"
+        ttk.Radiobutton(sections_frame, text="Auto Detection", variable=self.mode_var, 
+                        value="auto").grid(row=6, column=0, padx=5, pady=2, sticky=tk.W)
+        ttk.Radiobutton(sections_frame, text="Manual Only", variable=self.mode_var,
+                       value="manual").grid(row=6, column=1, padx=5, pady=2, sticky=tk.W)
+        
+        # Make the sections frame columns expandable
+        sections_frame.columnconfigure(0, weight=1)
+        
+        # Buttons frame
+        buttons_frame = ttk.Frame(main_frame)
+        buttons_frame.pack(fill=tk.X, padx=5, pady=10)
+        
+        ttk.Button(buttons_frame, text="Analyze Video", command=self.analyze_video).pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons_frame, text="Process Video", command=self.process_video).pack(side=tk.LEFT, padx=5)
+        
+        # Status bar
+        self.status_var = tk.StringVar(value="Ready")
+        status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
+        status_bar.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Progress bar
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progress_bar = ttk.Progressbar(main_frame, variable=self.progress_var, maximum=100)
+        self.progress_bar.pack(fill=tk.X, padx=5, pady=5)
+    
+    def browse_input(self):
+        filename = filedialog.askopenfilename(
+            title="Select Input Video File",
+            filetypes=[("Video files", "*.mp4;*.avi;*.mov"), ("All files", "*.*")]
+        )
+        if filename:
+            self.video_input.set(filename)
+    
+    def browse_output(self):
+        filename = filedialog.asksaveasfilename(
+            title="Select Output Video File",
+            defaultextension=".mp4",
+            filetypes=[("MP4 files", "*.mp4"), ("All files", "*.*")]
+        )
+        if filename:
+            self.video_output.set(filename)
+    
+    def update_progress(self, value, message=""):
+        self.progress_var.set(value)
+        if message:
+            self.status_var.set(message)
+        self.root.update_idletasks()
+    
+    def add_manual_section(self):
+        try:
+            start = self.start_var.get()
+            end = self.end_var.get()
+            section_type = self.section_type_var.get()
+            
+            if end <= start:
+                messagebox.showerror("Invalid Input", "End time must be greater than start time")
+                return
+            
+            section = (start, end, section_type)
+            self.manual_sections.append(section)
+            self.update_sections_listbox()
+            
+            # Clear inputs
+            self.start_var.set(0)
+            self.end_var.set(0)
+        except Exception as e:
+            messagebox.showerror("Error", f"Invalid input: {str(e)}")
+    
+    def remove_section(self):
+        try:
+            selected_idx = self.sections_listbox.curselection()[0]
+            if self.mode_var.get() == "manual":
+                self.manual_sections.pop(selected_idx)
+            else:
+                self.motion_sections.pop(selected_idx)
+            self.update_sections_listbox()
+        except (IndexError, Exception) as e:
+            messagebox.showerror("Error", "Please select a section to remove")
+    
+    def clear_sections(self):
+        if self.mode_var.get() == "manual":
+            self.manual_sections = []
+        else:
+            self.motion_sections = []
+        self.update_sections_listbox()
+    
+    def update_sections_listbox(self):
+        self.sections_listbox.delete(0, tk.END)
+        
+        if self.mode_var.get() == "manual":
+            for i, (start, end, section_type) in enumerate(self.manual_sections):
+                self.sections_listbox.insert(tk.END, f"{i+1}. {start:.2f}s - {end:.2f}s ({section_type})")
+        else:
+            for i, (start, end, section_type) in enumerate(self.motion_sections):
+                self.sections_listbox.insert(tk.END, f"{i+1}. {start:.2f}s - {end:.2f}s ({section_type})")
+    
+    def analyze_video(self):
+        if not os.path.exists(self.video_input.get()):
+            messagebox.showerror("Error", "Input video file does not exist")
+            return
+        
+        # Start analysis in a separate thread
+        self.is_processing = True
+        Thread(target=self._analyze_video_thread).start()
+    
+    def _analyze_video_thread(self):
+        try:
+            self.status_var.set("Analyzing video for motion...")
+            
+            # Open video
+            cap = cv2.VideoCapture(self.video_input.get())
+            self.fps = cap.get(cv2.CAP_PROP_FPS)
+            self.frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            # Get first frame
+            ret, prev_frame = cap.read()
+            if not ret:
+                raise Exception("Could not read video")
+            
+            prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+            self.motion_scores = []
+            self.motion_sections = []
+            current_slow_start = None
+            current_fast_start = None
+            slow_threshold = self.motion_threshold.get()
+            fast_threshold = self.fast_motion_threshold.get()
+            
+            # Process each frame
+            for i in range(1, self.frame_count):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # Update progress
+                if i % 10 == 0:  # Update every 10 frames
+                    progress = (i / self.frame_count) * 100
+                    self.root.after(0, lambda p=progress: self.update_progress(p, f"Analyzing frame {i}/{self.frame_count}"))
+                
+                # Process frame
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                diff = cv2.absdiff(prev_gray, gray)
+                _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+                motion_score = np.sum(thresh)
+                self.motion_scores.append(motion_score)
+                
+                # Detect slow motion sections (high motion)
+                if motion_score > slow_threshold:
+                    # Close any open fast section before starting a slow section
+                    if current_fast_start is not None:
+                        self.motion_sections.append((current_fast_start / self.fps, i / self.fps, "FAST"))
+                        current_fast_start = None
+                    
+                    # Start a new slow section if not already in one
+                    if current_slow_start is None:
+                        current_slow_start = i
+                elif motion_score < fast_threshold:
+                    # Close any open slow section before starting a fast section
+                    if current_slow_start is not None:
+                        self.motion_sections.append((current_slow_start / self.fps, i / self.fps, "SLOW"))
+                        current_slow_start = None
+                    
+                    # Start a new fast section if not already in one
+                    if current_fast_start is None:
+                        current_fast_start = i
+                else:
+                    # Motion is between fast and slow thresholds (normal)
+                    # Close any open sections
+                    if current_slow_start is not None:
+                        self.motion_sections.append((current_slow_start / self.fps, i / self.fps, "SLOW"))
+                        current_slow_start = None
+                    if current_fast_start is not None:
+                        self.motion_sections.append((current_fast_start / self.fps, i / self.fps, "FAST"))
+                        current_fast_start = None
+                
+                prev_gray = gray
+            
+            # Add last section if needed
+            if current_slow_start is not None:
+                self.motion_sections.append((current_slow_start / self.fps, (self.frame_count - 1) / self.fps, "SLOW"))
+            if current_fast_start is not None:
+                self.motion_sections.append((current_fast_start / self.fps, (self.frame_count - 1) / self.fps, "FAST"))
+            
+            cap.release()
+            
+            # Update motion graph
+            self.update_motion_graph()
+            
+            # Update sections listbox
+            self.update_sections_listbox()
+            
+            self.status_var.set(f"Analysis complete. Found {len(self.motion_sections)} motion sections.")
+            self.update_progress(100)
+            
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Analysis failed: {str(e)}"))
+            self.status_var.set("Analysis failed")
+        
+        finally:
+            self.is_processing = False
+    
+    def update_motion_graph(self):
+        self.ax.clear()
+        if self.motion_scores:
+            self.ax.plot(self.motion_scores, label="Motion Score per Frame")
+            self.ax.axhline(y=self.motion_threshold.get(), color='r', linestyle='--', 
+                           label=f"Slow Threshold ({self.motion_threshold.get()})")
+            self.ax.axhline(y=self.fast_motion_threshold.get(), color='b', linestyle='--', 
+                           label=f"Fast Threshold ({self.fast_motion_threshold.get()})")
+            self.ax.set_title("Motion Intensity in Video")
+            self.ax.set_xlabel("Frame")
+            self.ax.set_ylabel("Motion Score")
+            self.ax.legend()
+            self.ax.grid(True)
+            
+            # Mark motion sections
+            for start, end, section_type in self.motion_sections:
+                start_frame = int(start * self.fps)
+                end_frame = int(end * self.fps)
+                if start_frame < len(self.motion_scores) and end_frame <= len(self.motion_scores):
+                    if section_type == "SLOW":
+                        self.ax.axvspan(start_frame, end_frame, alpha=0.3, color='green')
+                    elif section_type == "FAST":
+                        self.ax.axvspan(start_frame, end_frame, alpha=0.3, color='orange')
+            
+            self.canvas.draw()
+    
+    def process_video(self):
+        if not os.path.exists(self.video_input.get()):
+            messagebox.showerror("Error", "Input video file does not exist")
+            return
+        
+        if (self.mode_var.get() == "auto" and not self.motion_sections) or \
+           (self.mode_var.get() == "manual" and not self.manual_sections):
+            messagebox.showerror("Error", "No motion sections found. Please analyze the video first or add manual sections.")
+            return
+        
+        # Start processing in a separate thread
+        self.is_processing = True
+        Thread(target=self._process_video_thread).start()
+    
+    def _process_video_thread(self):
+        try:
+            self.status_var.set("Processing video...")
+            self.update_progress(0)
+            
+            # Prepare sections based on mode
+            sections = []
+            if self.mode_var.get() == "manual":
+                sections = self.manual_sections  # Already has the format (start, end, type)
+            else:
+                sections = self.motion_sections  # Now also has the format (start, end, type)
+            
+            # Open input video
+            cap = cv2.VideoCapture(self.video_input.get())
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            # Create output video
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # or 'XVID'
+            out = cv2.VideoWriter(self.video_output.get(), fourcc, fps, (width, height))
+            
+            # Prepare frames data structure
+            frame_data = []
+            
+            # First pass: Read all frames and determine which ones to use
+            self.status_var.set("Reading frames...")
+            frame_idx = 0
+            
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # Update progress
+                if frame_idx % 30 == 0:  # Update every 30 frames
+                    progress = (frame_idx / total_frames) * 40  # 40% of progress for reading
+                    self.root.after(0, lambda p=progress: self.update_progress(
+                        p, f"Reading frame {frame_idx}/{total_frames}"))
+                
+                frame_time = frame_idx / fps
+                
+                # Check if this frame is in a section and get its type
+                in_section = False
+                section_type = "NORMAL"
+                for start, end, s_type in sections:
+                    if start <= frame_time < end:
+                        in_section = True
+                        section_type = s_type
+                        break
+                
+                frame_data.append((frame, section_type))
+                frame_idx += 1
+            
+            cap.release()
+            
+            # Second pass: Process and write frames
+            self.status_var.set("Writing frames...")
+            
+            slow_factor = self.slow_motion_factor.get()
+            fast_factor = self.fast_motion_factor.get()
+            
+            # Determine which frames to use
+            output_frames = []
+            
+            for i, (frame, section_type) in enumerate(frame_data):
+                if section_type == "SLOW":
+                    # For slow motion: duplicate frames
+                    duplicates = int(1 / slow_factor) - 1
+                    output_frames.append(frame)  # Original frame
+                    for _ in range(duplicates):
+                        output_frames.append(frame.copy())  # Add duplicates
+                elif section_type == "FAST":
+                    # For fast motion: we'll skip frames
+                    if i % int(fast_factor) == 0:
+                        output_frames.append(frame)
+                else:  # NORMAL
+                    output_frames.append(frame)  # Keep as is
+            
+            # Write output frames
+            for i, frame in enumerate(output_frames):
+                out.write(frame)
+                
+                # Update progress
+                if i % 30 == 0:  # Update every 30 frames
+                    progress = 40 + (i / len(output_frames)) * 60  
+                    self.root.after(0, lambda p=progress: self.update_progress(
+                        p, f"Writing frame {i}/{len(output_frames)}"))
+            
+            out.release()
+            
+            self.status_var.set("Processing complete!")
+            self.update_progress(100)
+            messagebox.showinfo("Success", f"Video processing completed successfully. Output saved to: {self.video_output.get()}")
+            
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Processing failed: {str(e)}"))
+            self.status_var.set("Processing failed")
+        
+        finally:
+            self.is_processing = False
+
+# Run the application
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = TennisVideoEditor(root)
+    root.mainloop()
